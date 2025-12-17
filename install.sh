@@ -1,5 +1,5 @@
 #!/bin/bash
-# Show-Off Server Installer - javított / robusztus verzió
+# SHOW-OFF SERVER INSTALLER vFINAL + MENU + MATH GUARD
 # Debian / Ubuntu / VirtualBox
 
 set -u
@@ -10,21 +10,20 @@ export DEBIAN_FRONTEND=noninteractive
 # KONFIG
 ############################################
 CONFIG_FILE="./config.conf"
-if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-else
-  echo "WARN: config.conf nem található, alapértelmezett értékekkel futok."
-fi
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE" || echo "WARN: config.conf nem található"
 
 : "${DRY_RUN:=false}"
+: "${AUTO_INSTALL:=false}"
+
 : "${INSTALL_APACHE:=true}"
 : "${INSTALL_SSH:=true}"
 : "${INSTALL_NODE_RED:=true}"
 : "${INSTALL_MOSQUITTO:=true}"
 : "${INSTALL_MARIADB:=true}"
 : "${INSTALL_PHP:=true}"
+: "${INSTALL_PHPMYADMIN:=true}"
 : "${INSTALL_UFW:=true}"
+
 : "${LOGFILE:=/var/log/showoff_installer.log}"
 
 ############################################
@@ -35,9 +34,7 @@ RED="\e[31m"; GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; NC="\e[0m"
 ############################################
 # ROOT CHECK
 ############################################
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  echo -e "${RED}Root jogosultság szükséges.${NC}"; exit 1
-fi
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo -e "${RED}Root szükséges${NC}"; exit 1; }
 
 ############################################
 # LOG
@@ -45,17 +42,48 @@ fi
 mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || true
 touch "$LOGFILE" 2>/dev/null || true
 
-log() { echo "$(date '+%F %T') | $1" >> "$LOGFILE"; }
+log()  { echo "$(date '+%F %T') | $1" >> "$LOGFILE"; }
 ok()   { echo -e "${GREEN}✔ $1${NC}"; log "OK: $1"; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}"; log "WARN: $1"; }
 fail() { echo -e "${RED}✖ $1${NC}"; log "FAIL: $1"; }
 
 run() {
-  if [[ "$DRY_RUN" == "true" ]]; then
-    warn "[DRY-RUN] $*"
-    return 0
-  fi
+  [[ "$DRY_RUN" == "true" ]] && { warn "[DRY-RUN] $*"; return 0; }
   "$@"
+}
+
+############################################
+# RANDOM MATEK FELADAT (LETÖLTÉS VÉDELEM)
+############################################
+MATH_OK=false
+
+math_challenge() {
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  [[ "$MATH_OK" == "true" ]] && return 0
+
+  local a b op correct answer q
+  a=$((RANDOM % 20 + 1))
+  b=$((RANDOM % 20 + 1))
+  op=$((RANDOM % 3))
+
+  case "$op" in
+    0) correct=$((a + b)); q="$a + $b" ;;
+    1) correct=$((a - b)); q="$a - $b" ;;
+    2) correct=$((a * b)); q="$a × $b" ;;
+  esac
+
+  echo
+  echo "🧠 Biztonsági ellenőrzés"
+  echo "   $q = ?"
+  read -rp "Válasz: " answer
+
+  [[ "$answer" == "$correct" ]] || {
+    fail "Hibás válasz – telepítés megszakítva"
+    exit 1
+  }
+
+  MATH_OK=true
+  ok "Helyes válasz"
 }
 
 ############################################
@@ -64,218 +92,147 @@ run() {
 clear
 cat << "EOF"
 =========================================
-  SHOW-OFF SERVER INSTALLER vFINAL (FIXED)
+ SHOW-OFF SERVER INSTALLER
 =========================================
 EOF
-
 echo -e "${BLUE}Logfile:${NC} $LOGFILE"
 
 ############################################
-# EREDMÉNYEK
+# MENÜ
 ############################################
-declare -A RESULTS
-set_result() { RESULTS["$1"]="$2"; }
+show_menu() {
+  echo
+  echo "1) Apache2"
+  echo "2) SSH"
+  echo "3) Mosquitto (MQTT)"
+  echo "4) Node-RED"
+  echo "5) MariaDB"
+  echo "6) PHP"
+  echo "7) phpMyAdmin"
+  echo "8) UFW"
+  echo "9) MINDEN telepítése"
+  echo "0) Kilépés"
+  read -rp "Választás (pl: 1 4 8 vagy 9): " MENU_SELECTION
+}
+
+reset_flags() {
+  INSTALL_APACHE=false
+  INSTALL_SSH=false
+  INSTALL_MOSQUITTO=false
+  INSTALL_NODE_RED=false
+  INSTALL_MARIADB=false
+  INSTALL_PHP=false
+  INSTALL_PHPMYADMIN=false
+  INSTALL_UFW=false
+}
+
+apply_selection() {
+  reset_flags
+  for c in $MENU_SELECTION; do
+    case "$c" in
+      1) INSTALL_APACHE=true ;;
+      2) INSTALL_SSH=true ;;
+      3) INSTALL_MOSQUITTO=true ;;
+      4) INSTALL_NODE_RED=true ;;
+      5) INSTALL_MARIADB=true ;;
+      6) INSTALL_PHP=true ;;
+      7) INSTALL_PHPMYADMIN=true ;;
+      8) INSTALL_UFW=true ;;
+      9)
+        INSTALL_APACHE=true
+        INSTALL_SSH=true
+        INSTALL_MOSQUITTO=true
+        INSTALL_NODE_RED=true
+        INSTALL_MARIADB=true
+        INSTALL_PHP=true
+        INSTALL_PHPMYADMIN=true
+        INSTALL_UFW=true ;;
+      0) exit 0 ;;
+    esac
+  done
+}
 
 ############################################
 # APT HELPERS
 ############################################
-apt_update() { run apt-get update -y; }
-apt_install() { run apt-get install -y "$@"; }
+apt_update() { run apt-get update; }
+apt_install() {
+  math_challenge
+  run apt-get install -y "$@"
+}
 
 ############################################
 # SAFE STEP
 ############################################
+declare -A RESULTS
 safe_step() {
   local label="$1"; shift
-  if [[ "$DRY_RUN" == "true" ]]; then
-    set_result "$label" "DRY-RUN"
-    warn "$label DRY-RUN"
-    return 0
-  fi
-
   log "START: $label"
-  if "$@"; then
-    set_result "$label" "SIKERES"
-    return 0
-  else
-    set_result "$label" "HIBA"
-    return 1
+  if "$@"; then RESULTS["$label"]="SIKERES"; return 0
+  else RESULTS["$label"]="HIBA"; return 1
   fi
 }
 
 ############################################
 # TELEPÍTŐK
 ############################################
-install_apache() {
-  apt_install apache2 || return 1
-  run systemctl enable --now apache2 || return 1
-}
+install_apache()      { apt_install apache2 && run systemctl enable --now apache2; }
+install_ssh()         { apt_install openssh-server && run systemctl enable --now ssh; }
+install_mosquitto()   { apt_install mosquitto mosquitto-clients && run systemctl enable --now mosquitto; }
+install_mariadb()     { apt_install mariadb-server && run systemctl enable --now mariadb; }
+install_php()         { apt_install php libapache2-mod-php php-mysql && run systemctl restart apache2; }
 
-install_ssh() {
-  apt_install openssh-server || return 1
-  run systemctl enable --now ssh || return 1
-}
-
-install_mosquitto() {
-  apt_install mosquitto mosquitto-clients || return 1
-  run systemctl enable --now mosquitto || return 1
-}
-
-install_mariadb() {
-  apt_install mariadb-server || return 1
-  run systemctl enable --now mariadb || return 1
-}
-
-install_php() {
-  apt_install php libapache2-mod-php php-mysql || return 1
-  run systemctl restart apache2 || return 1
-}
-
-install_ufw() {
-  apt_install ufw || return 1
-
-  if systemctl is-active --quiet ssh; then
-    run ufw allow OpenSSH
-  else
-    warn "SSH nem fut – OpenSSH szabály kihagyva"
-  fi
-
-  run ufw allow 80/tcp
-  run ufw allow 1880/tcp
-  run ufw allow 1883/tcp
-  run ufw --force enable || return 1
+install_phpmyadmin() {
+  math_challenge
+  echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections
+  echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
+  apt_install phpmyadmin
+  run systemctl reload apache2
 }
 
 install_node_red() {
-  apt_install curl ca-certificates || return 1
-
-  set +e
-  curl -fsSL https://github.com/node-red/linux-installers/releases/latest/download/update-nodejs-and-nodered-deb \
-    | bash -s -- --confirm-root
-  set -e
-
+  apt_install curl ca-certificates
+  math_challenge
+  curl -fsSL https://github.com/node-red/linux-installers/releases/latest/download/update-nodejs-and-nodered-deb | bash -s -- --confirm-root
   run systemctl daemon-reload
-
-  for svc in nodered node-red; do
-    if systemctl list-unit-files | grep -q "^$svc.service"; then
-      run systemctl enable --now "$svc.service"
-      break
-    fi
-  done
-
-  command -v node-red >/dev/null 2>&1
+  systemctl enable --now nodered.service 2>/dev/null || true
 }
 
-############################################
-# EXTRA: SHOW-OFF DASHBOARD (Apache)
-############################################
-create_dashboard() {
-  local WEBROOT="/var/www/html"
-  cat > "$WEBROOT/index.html" << 'EOF'
-<!DOCTYPE html>
-<html lang="hu">
-<head>
-<meta charset="UTF-8">
-<title>Show-Off Server</title>
-<style>
-body { font-family: Arial, sans-serif; background:#0f172a; color:#e5e7eb; padding:40px; }
-h1 { color:#38bdf8; }
-.card { background:#020617; border-radius:16px; padding:20px; margin:20px 0; box-shadow:0 0 25px rgba(56,189,248,0.2); }
-.ok { color:#22c55e; }
-.bad { color:#ef4444; }
-
-/* EXTRA VIZUÁLIS ELEMEK */
-.status-dot {
-  display:inline-block;
-  width:12px;
-  height:12px;
-  border-radius:50%;
-  margin-right:8px;
-}
-.status-ok {
-  background:#22c55e;
-  box-shadow:0 0 10px #22c55e;
-}
-.status-bad {
-  background:#ef4444;
-  box-shadow:0 0 10px #ef4444;
-}
-.bar {
-  background:#020617;
-  border-radius:10px;
-  overflow:hidden;
-  margin-top:8px;
-}
-.bar-fill {
-  height:10px;
-  background:linear-gradient(90deg,#38bdf8,#22c55e);
-  width:0%;
-  animation: fill 1.5s forwards;
-}
-@keyframes fill { from { width:0%; } to { width:100%; } }
-</style>
-</head>
-<body>
-<h1>🚀 Show-Off Server Dashboard</h1>
-<div class="card">
-<b>Hostname:</b> $(hostname)<br>
-<b>OS:</b> $(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')<br>
-<b>Kernel:</b> $(uname -r)<br>
-<b>Dátum:</b> $(date)
-</div>
-<div class="card">
-<h2>Szolgáltatások</h2>
-<ul>
-<li><span class="status-dot $(systemctl is-active --quiet apache2 && echo status-ok || echo status-bad)"></span>Apache: <b>$(systemctl is-active apache2)</b><div class="bar"><div class="bar-fill"></div></div></li>
-<li><span class="status-dot $(systemctl is-active --quiet ssh && echo status-ok || echo status-bad)"></span>SSH: <b>$(systemctl is-active ssh)</b><div class="bar"><div class="bar-fill"></div></div></li>
-<li><span class="status-dot $(systemctl is-active --quiet mosquitto && echo status-ok || echo status-bad)"></span>Mosquitto: <b>$(systemctl is-active mosquitto)</b><div class="bar"><div class="bar-fill"></div></div></li>
-<li><span class="status-dot $(systemctl is-active --quiet mariadb && echo status-ok || echo status-bad)"></span>MariaDB: <b>$(systemctl is-active mariadb)</b><div class="bar"><div class="bar-fill"></div></div></li>
-<li><span class="status-dot $(systemctl is-active --quiet nodered && echo status-ok || echo status-bad)"></span>Node-RED: <b>$(systemctl is-active nodered 2>/dev/null)</b><div class="bar"><div class="bar-fill"></div></div></li>
-</ul>
-</div>
-<div class="card">
-<h2>Portok</h2>
-<pre>$(ss -tulpn | grep -E '(:80|:1880|:1883)' || echo 'Nincs aktív port')</pre>
-</div>
-</body>
-</html>
-EOF
+install_ufw() {
+  apt_install ufw
+  run ufw allow OpenSSH
+  run ufw allow 80/tcp
+  run ufw allow 1880/tcp
+  run ufw allow 1883/tcp
+  run ufw --force enable
 }
 
 ############################################
 # FUTTATÁS
 ############################################
-apt_update || warn "APT update sikertelen"
+[[ "$AUTO_INSTALL" != "true" ]] && show_menu && apply_selection
+
+apt_update || exit 1
 
 run_install() {
   local var="$1" label="$2" func="$3"
-  echo -e "${BLUE}==> $label${NC}"
-
-  if [[ "${!var}" == "true" ]]; then
-    safe_step "$label" "$func" && ok "$label OK" || fail "$label HIBA"
-  else
-    set_result "$label" "KIHAGYVA"
-    warn "$label kihagyva"
-  fi
-  echo
+  [[ "${!var}" == "true" ]] && safe_step "$label" "$func" && ok "$label" || warn "$label kihagyva"
 }
 
-run_install INSTALL_APACHE    "Apache2"   install_apache
-run_install INSTALL_SSH       "SSH"       install_ssh
-run_install INSTALL_MOSQUITTO "Mosquitto" install_mosquitto
-run_install INSTALL_NODE_RED  "Node-RED"  install_node_red
-run_install INSTALL_MARIADB   "MariaDB"   install_mariadb
-run_install INSTALL_PHP       "PHP"       install_php
-run_install INSTALL_UFW       "UFW"       install_ufw
+run_install INSTALL_APACHE     "Apache2"     install_apache
+run_install INSTALL_SSH        "SSH"         install_ssh
+run_install INSTALL_MOSQUITTO  "Mosquitto"   install_mosquitto
+run_install INSTALL_NODE_RED   "Node-RED"    install_node_red
+run_install INSTALL_MARIADB    "MariaDB"     install_mariadb
+run_install INSTALL_PHP        "PHP"         install_php
+run_install INSTALL_PHPMYADMIN "phpMyAdmin"  install_phpmyadmin
+run_install INSTALL_UFW        "UFW"         install_ufw
 
 ############################################
 # ÖSSZEFOGLALÓ
 ############################################
-ORDER=("Apache2" "SSH" "Mosquitto" "Node-RED" "MariaDB" "PHP" "UFW")
-
 echo "================================="
-for k in "${ORDER[@]}"; do
+for k in Apache2 SSH Mosquitto Node-RED MariaDB PHP phpMyAdmin UFW; do
   echo "$k : ${RESULTS[$k]:-N/A}"
 done
-
 exit 0
